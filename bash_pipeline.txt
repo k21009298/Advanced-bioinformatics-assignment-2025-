@@ -1,0 +1,456 @@
+#!/bin/bash  
+#This tells the system to use bash to run the script
+#NGS Pipeline Project Script
+#Project Description
+#This Project automates the analysis of next-generation sequencing(NGS) data, including quality control, trimming, alignment, variant calling,variant annotation and variant prioritisation 
+
+#Before you start ensure you are in the home directory
+#Use the command pwd which return to the home directory
+pwd
+
+##**Data Organsation**
+echo "Step 1:Data organisation"
+
+#Create the main directory with DNAseq analysiss as a subdirectory
+#Use the command mkdir to create new directories
+echo "Creating main directories ..."
+mkdir ngs_project
+mkdir ngs_project/dnaseq
+
+#Change directories into the DNAseq directory using the cd command
+cd ~/ngs_project/dnaseq
+
+#Create directories in the DNAseq folder to keep data organised
+echo "Creating subdirectories ..."
+mkdir data
+mkdir meta
+mkdir results
+mkdir logs
+
+#To confirm you have created these directories use the command ls
+ls -lF
+
+#Now we need to create seperate subdirectories in the data directory for our trimmed and untrimmed reads
+#First we need to change direcotries into our data directory
+cd ~/ngs_project/dnaseq/data
+mkdir untrimmed_fastq
+mkdir trimmed_fastq
+
+#Now we need to download our raw data
+#Use the command wget to download files
+echo "Downloading data files..."
+wget https://s3-eu-west-1.amazonaws.com/workshopdata2017/NGS0001.R1.fastq.qz
+wget https://s3-eu-west-1.amazonaws.com/workshopdata2017/NGS0001.R2.fastq.qz
+wget https://s3-eu-west-1.amazonaws.com/workshopdata2017/annotation.bed
+
+#The sequencing data needs to be renamed to correct the extension
+#We need to change from .qz to .gz
+#To rename files we need to use the command mv
+echo "Correcting FASTQ files extension..."
+mv NGS0001.R1.fastq.qz NGS0001.R1.fastq.gz
+mv NGS0001.R2.fastq.qz NGS0001.R2.fastq.gz
+
+#Then we need to move these sequencing files into our untrimmed_fastq directory and the bed file into the data directory
+#Files can be moved using the command mv
+echo "moving files to correct direcotries..."
+mv *fastq.gz ~/ngs_project/dnaseq/data/untrimmed_fastq
+mv annotation.bed ~/ngs_project/dnaseq/data
+
+#Download the reference genome which we need for later in the pipeline and move it into the data directory
+echo "Downloading reference genome..."
+wget http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
+mv hg19.fa.gz ~/ngs_project/dnaseq/data
+
+#To continue with our pipeline, we need to download the required tools
+#First we need to move into the home directory
+cd ~/
+
+#Now we need to download Anaconda so that we can install the tools
+echo "Downloading Anaconda..."
+wget https://repo.anaconda.com/archive/Anaconda3-2022.10-Linux-x86_64.sh
+chmod +x ./Anaconda3-2022.10-Linux-x86_64.sh
+bash ./Anaconda3-2022.10-Linux-x86_64.sh
+source ~/.bashrc
+conda config --add channels defaults
+conda config --add channels bioconda
+conda config --add channels conda-forge
+
+#Now we need to install all the required tools for our pipeline
+echo "installing tools..."
+conda install samtools
+conda install bwa
+conda install freebayes
+conda install picard
+conda install bedtools
+conda install trimmomatic
+conda install fastqc
+sudo apt install libvcflib-tools
+
+##**2.2 Pre-Alignment QC**
+echo "2.2 Pre-Alignment QC"
+
+##**Quality assessment of FASTQ files**
+echo "Step 2 Quality Assessment of FASTQ files"
+
+#One of the most important steps in our pipeline is quality control
+#It helps remove any noise and bad reads
+#First we need to change directories into out untrimmed directory
+cd ~/ngs_project/dnaseq/data/untrimmed_fastq
+
+#Now we need to run FASTQC on our fastq files
+#We can use multi-threading to help run FASTQC quicker
+echo "running FASTQ..."
+fastqc -t 4 *.fastq.gz
+
+#Create a subdirectory in the results directory to store your FASTQC results and move it there
+mkdir ~/ngs_project/dnaseq/results/fastqc_untrimmed_reads
+mv *fastqc* ~/ngs_project/dnaseq/results/fastqc_untrimmed_reads/
+
+#Verify and view your results
+#Your results should have two outputs for each sequencing file
+#One .zip file and one .HTML file
+ls -lh ~/ngs_project/dnaseq/results/fastqc_untrimmed_reads/
+
+#View your FASTQC results by downloading and transferring your results in HTML format using FILEZILLA
+#FILEZILLA is used to transfer the HTML files to you personal computer
+#Once you transfer the document onto your personal computer you can view your results
+#The FASTQC results will give us a plot about "Per base sequence quality" and a table about "Overrepresented sequences"
+#The "Per base sequence quality" plot is a boxplot for each base position showing the distribution of quality scores
+#The "Overrepresented sequences" table list any sequences (at least 20bp) such as adapter, primers and contaminants which occur more frequently (more than 0.1%)
+#These results can help decide if you need to trim low quality bases or adapters
+#Repeating this step post-trimming can confirm trimming has worked
+
+#Now on terminal the two .zip file need to be unzipped
+#Make sure you are in the right directory
+cd ~/ngs_project/dnaseq/results/fastqc_untrimmed_reads/
+
+#Now we use a loop to unzip multiple files at once
+#The loop command will go through each .zip file in the directory
+#For each iteration, $zip is set to the name of one .zip file
+#After this loop finishes, all the .zip files will be uncompressed
+#You'll now see one folder per .zip file
+#Each folder contains the FastQC HTML report and raw data
+echo "unzipping FASTQC files..."
+for zip in *.zip
+do
+unzip $zip
+done
+
+#Check the information stored in the unzipped file
+ls -lh ~/ngs_project/dnaseq/results/fastqc_untrimmed_reads/
+head ~/ngs_project/dnaseq/results/fastqc_untrimmed_reads/*/summary.txt
+
+#Combine all summary.txt files into one and save to fastqc_summaries.txt
+#This collects files from all subdirectories
+cat */summary.txt > ~/ngs_project/dnaseq/logs/fastqc_summaries.txt
+
+##••Step 3 Trimmomatic**
+##**Trimmomatic**
+#Trimming the sequence data helps to improve quality
+#It removes low-quality bases, eliminates unwanted contamination, helps reads align better to the genome and reduces the chances for false positives in downstream analysis
+#Lets run trimmoamtic using the following commands
+echo "running trimmomatic..."
+trimmomatic PE \
+-threads 4 \
+-phred33 \
+/home/ubuntu/ngs_project/dnaseq/data/untrimmed_fastq/NGS0001.R1.fastq.gz \
+/home/ubuntu/ngs_project/dnaseq/data/untrimmed_fastq/NGS0001.R2.fastq.gz \
+-baseout /home/ubuntu/ngs_project/dnaseq/data/trimmed_fastq/NGS0001_trimmed_R \
+ILLUMINACLIP:/home/ubuntu/anaconda3/pkgs/trimmomatic-0.39-hdfd78af_2/share/trimmomatic-0.39-2/adapters/NexteraPE-PE.fa:2:30:10 \
+TRAILING:25 \
+MINLEN:50
+
+##••Step 4: Quality Assessment of trimmed reads**
+echo "Quality Assessment of trimmed reads"
+
+#Repeat quality assessment with the paired trimmed reads
+#Repeating this step is important to:
+#1. Confirm the adapters and low-quality bases were properly removed
+#2. Check if the overall quality has improved post-trimming
+#3. Ensure you have clean reads for downstream analysis
+#Tools such as fast QC can help visualise this
+
+#First move into the trimmed directory where the trimmed results are stored
+cd ~/ngs_project/dnaseq/data/trimmed_fastq
+
+#Now conduct FASTQC on the paired trimmed files
+#We run FASTQC on both files at the same time
+echo "Running FASTQC on trimmed reads..."
+fastqc -t 4 *NGS0001_trimmed_R_1P *NGS0001_trimmed_R_2P
+
+#Create a new directory in the result directory to store the files generated by FASTQC
+mkdir ~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads
+
+#Move the FASTQC trimmed results into this directory
+mv *NGS0001_trimmed_R_1P* *NGS0001_trimmed_R_2P* ~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads
+
+#Use the command ls to verify the contents of the file
+ls -lh ~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads
+
+#Use Filezilla to view and interpret the FastQC results in HTML format
+#The results will give us a plot about "Per base sequence quality" and a table about "Overrepresented sequences"
+#The "Per base sequence quality" plot is a boxplot for each base position showing the distribution of quality scores
+#The "Overrepresented sequences" table list any sequences (at least 20bp) such as adapter, primers and contaminants which occur more frequently (more than 0.1%)
+#Viewing this after trimming can help confirm trimming has removed low quality bases and unwanted contaminants
+
+#On linux the FASTQC .zip files need to be unzipped so that we can view them
+#Unzipping the files allows us to access files such as summary.txt, fastqc data and HTML reports for visualisation
+#First change directories into the trimmed FastQC results
+cd ~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads
+
+#Unpack the zip files on linux using the following commands
+#This is a loop command which will go through each .zip file in the directory
+#For each iteration, $zip is set to the name of one .zip file
+#After this loop finishes, all the .zip files will be uncompressed
+#You'll now see one folder per .zip file
+#Each folder contains the FastQC HTML report and raw data
+echo "unzipping trimmed FASTQC files...",
+for zip in *.zip
+do
+unzip $zip
+done
+
+#Check and Preview the contents inside each of the unzipped files
+ls -lh ~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads
+head ~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads /*/summary.txt
+
+#Combine all summary.txt files into one and save to fastqc_summaries.txt
+#This collects files from all subdirectories
+echo "Combining summary.txt files..."
+cat ~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads/*_fastqc/summary.txt > ~/ngs_project/dnaseq/logs/fastqc_paired_trimmed_summaries.txt
+
+##**2.3 Alignment**
+echo "2.3 Alignment"
+
+echo "step 5: Alignment with bwa mem"
+
+##The next step in this pipeline is to do alignment with BWA mem
+#BWA mem is a widely used tool for mapping sequencing reads to a reference genome
+
+##First run BWA mem to help understand the available options
+bwa mem
+
+#Create and reference index file to store the reference and the index files we are going to generate in the next few steps
+#Next create a reference directory in the data directory
+#BWA create several files so this folder is created to store and organise all the data
+mkdir -p ~/ngs_project/dnaseq/data/reference
+
+#Now move the reference genome which you previously downloaded in the pipeline into this directory
+mv ~/ngs_project/dnaseq/data/hg19.fa.gz ~/ngs_project/dnaseq/data/reference
+
+#Run bwa mem
+#Indexing the reference genome prepares it in a way which allows BWA to search and map sequencing reads efficiently
+echo “indexing the reference genome”
+bwa index ~/ngs_project/dnaseq/data/reference/hg19.fa.gz
+
+#View the reference index file to ensure bwa mem has indexed the hg19 reference
+ls -lh ~/ngs_project/dnaseq/data/reference
+
+#BWA will generate several files with extensions such as .amb, .ann, .bwt, .pac, .sa
+#.amb contains information about ambiguous nucleotides in the reference genome
+#.ann stores basic annotation of the reference sequence
+#.bwt contains the burrows Wheeler transform of the reference sequence
+#.pac sorted a compressed version of the reference genome in a 2-bit format
+#.sa stores the suffix array of the reference genome
+
+#Create a new directory to store the aligned reads
+mkdir ~/ngs_project/dnaseq/data/aligned_data
+
+#Align the data using read group info
+#Read group info help distinguish between data from different sources
+#It is essential for variant calling and helps with duplicate, marking, base quality recalibration and genotyping
+#The read group info we use includes:
+#Read group identifier (SM) – NGS0001
+#Read group identifier (PL) – ILLUMINA
+#Read group identifier (LB) – lib1
+#Read group identifier (PU) – unit1
+echo "Aligning data using bwa mem..."
+bwa mem -t 4 \
+-R '@RG\tID:NGS0001\tSM:NGS0001\tPL:ILLUMINA\tLB:lib1\tPU:unit1' \
+~/ngs_project/dnaseq/data/reference/hg19.fa.gz \
+~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads/NGS0001_trimmed_R_1P \
+~/ngs_project/dnaseq/results/fastqc_paired_trimmed_reads/NGS0001_trimmed_R_2P \
+-o ~/ngs_project/dnaseq/data/aligned_data/NGS0001.sam
+
+#Change directories into the aligned_data file
+cd ~/ngs_project/dnaseq/data/aligned_data
+
+#Convert the sam file into bam file
+#This step is crucial for several reasons
+#.sam files are large therefore compressing these files into .bam is efficient
+#Converting allows other tools such as bcftools to work much faster
+#Most/all downstream tools require .bam files
+echo "Converting .sam to .bam..."
+samtools view -h -b NGS0001.sam > NGS0001.bam
+echo "Sorting bam file..."
+samtools sort NGS0001.bam > NGS0001_sorted.bam
+echo "Generating .bai..."
+samtools index NGS0001_sorted.bam
+ls
+
+#Post alignment QC and filtering
+echo "Step 6: Post alignment QC and filtering"
+#This process is to checks the quality of the aligned reads and removes poor quality reads
+#This steps ensures accurate variant calling
+
+#Mark duplicates
+#This step helps mark reads which are likely PCR duplicates
+#It doesn't remove them but flags them in the bam file so that tools such as bcftools can ignore them during variant calling
+echo "Marking duplicate..."
+picard MarkDuplicates I=NGS0001_sorted.bam O=NGS0001_sorted_marked.bam M=marked_dup_metrics.txt
+samtools index NGS0001_sorted_marked.bam
+
+#Filter bam based on mapping quality and bitewise flags
+#Filteirng the bam file keeps only the reads which are 'true' and valid
+#Filtering by the MAPQ score - the MAPQ score indicates how confident the aligner is that a read is correctly placed
+#We are going to filter reads and keep reads with a MAPQ score more than 20 as any lower would indicate the reads are mapped are multiple places
+#We will also filter by bitewise flags
+echo "Filtering bam based on mapping quality and bitewise flags..."
+samtools view -F 1796 -q 20 -o NGS0001_sorted_filtered.bam NGS0001_sorted_marked.bam
+samtools index NGS0001_sorted_filtered.bam
+
+#Generate standard alignment statisitics
+#stats such as flagstat, idxstat, depth coverage and insert size are generated to help interpret and ensure the previous filtering worked and the data quality is solid
+echo "Step 7: Generating alignment stats"
+
+
+#Flagstats
+#This will provide a fast overview of the data which shows us details such as how many reads are mapped, pairing quality, duplicate levels etc.
+echo "Flagstats..."
+samtools flagstat NGS0001_sorted_filtered.bam > flagstats.txt
+cat flagstats.txt
+
+#View the bam file
+samtools view NGS0001_sorted_filtered.bam | less -S
+
+#Idxstats
+##Generates alignment stats per chromosome
+#Shows us details about how many readsa are mapped to each chromosomes, how many were unmapped, the length of each reference seqeunce etc.
+echo "Idxstats..."
+samtools idxstats NGS0001_sorted_filtered.bam > idxstats.txt
+cat idxstats.txt
+
+#Insert size metrics
+#This is especially important as we are working with paired-end sequencing
+#The insert size is the length of the original DNA fragment between the two reads
+#It can tell us whether our paired-end library was constructed properly and whether our data is suitable for structural variant detection
+echo "Insert size metrics..."
+picard CollectInsertSizeMetrics \
+I=NGS0001_sorted_filtered.bam \
+O=insert_size_metrics.txt \
+H=insert_size_histogram.pdf \
+M=0.5
+
+#Depth of coverage
+#Tells us how well our genome/regions of interest are covered by our read
+#Depth (or coverage) refers to how many times a base (or region) is read by sequencing reads.
+echo "Depth of coverage..."
+bedtools genomecov -ibam NGS0001_sorted_filtered.bam -dz > depth.txt
+head depth.txt
+
+#Once you have completed the stats transfer them onto your presonal device to view
+#Transfer the Idxstat.txt, Flagstat.txt, Depth.txt and histogram.pdf
+
+##**2.4 Variant calling**
+echo "2.4 Variant calling"
+
+echo "Step 8: variant calling with freebayes"
+
+#Freebayes scans the aligned reads in your BAM file and looks for variants compared to the reference genome such as SNPs and Indels
+#It will provide a vcf output file  with the detected variants
+echo "Calling variants..."
+zcat ~/ngs_project/dnaseq/data/reference/hg19.fa.gz > ~/ngs_project/dnaseq/data/reference/hg19.fa
+samtools faidx ~/ngs_project/dnaseq/data/reference/hg19.fa
+
+freebayes --bam ~/ngs_project/dnaseq/data/aligned_data/NGS0001_sorted_filtered.bam --fasta-reference ~/ngs_project/dnaseq/data/reference/hg19.fa --vcf ~/ngs_project/dnaseq/results/NGS0001.vcf
+#Compress the VCF file in blocks using the command bgzip, which can then be indexed by tabix
+bgzip ~/ngs_project/dnaseq/results/NGS0001.vcf
+#Install tabix
+sudo apt install tabix
+#Index the compressed VCF file
+tabix -p vcf ~/ngs_project/dnaseq/results/NGS0001.vcf.gz
+
+#Filtering variants using the VCF file
+#After calling variants filtering is required to remove low-confidence calls which are likely false positives
+#Raw variant calls often contain noise
+#Filtering the variant calls can improve the accuracy and reliability of downstream analysis
+#Filter using the specified filters
+#QUAL > 1 — Keeps variants with quality above 1
+#AO > 10 — Allelic observations should exceed 10
+#SAF > 0 & SAR > 0 - Reads supporting the variant on both forward (SAF) and reverse (SAR) strands
+#RPR > 1 & RPL > 1 - At least 1 read pair on each side, ensuring balanced coverage
+#The output will be stored in a files names NGS0001_filtered.vcf
+echo "Filtering varaint calls..."
+vcffilter -f "QUAL > 1 & QUAL / AO > 10 & SAF > 0 & RPR > 1 & > 1" \
+~/ngs_project/dnaseq/results/NGS0001.vcf.gz > ~/ngs_project/dnaseq/results/NGS0001_filtered.vcf
+
+#Use the annotation BED file we downloaded at the start of the pipeline
+#Find the variants which overlap the regions of the BED file
+#We us the --header option to only print the overlapping variant records
+#We use the -wa option to  write the overlapping variant to a NGS0001_filtered_annotated.vcf file
+echo "Finding variants overlapping BED file..."
+bedtools intersect -header -wa -a \
+~/ngs_project/dnaseq/results/NGS0001_filtered.vcf -b ../annotation.bed \
+~/ngs_project/dnaseq/results/NGS0001_filtered.vcf
+
+#use bgzip to compress the larger file in blocks
+bgzip ~/ngs_project/dnaseq/results/NGS0001_filtered.vcf
+#Index the file using tabix
+tabix -p vcf ~/ngs_project/dnaseq/results/NGS0001_filtered.vcf.gz
+
+##**2.5 Variant annotation and Prioritisation**
+echo "2.5 Variant annotation and Prioritisation"
+echo "Step 9: Variant annotation with annovar and snpeff"
+
+#Before we start with variant annotation we need to clear storage so that we have enough storage to continue with our pipeline
+#Use the command rm -rf to delete the follwing file
+#These file are raw file or files which we no longer need therefore they are safe to delete to clear storage and will not effect our downstream analysis
+
+#First move into the aligned_data directory
+cd ~/ngs_project/dnaseq/data/aligned_data
+
+#Now delete the following files
+echo "Deleting files..."
+rm -rf ~/ngs_project/dnaseq/data/untrimmed_fastq/*
+rm NGS0001.sam
+rm NGS0001.bam
+rm NGS0001_sorted.bam
+rm -rf ~/ngs_project/dnaseq/data/reference/hg19.fa.gz
+rm -rf ~/ngs_project/dnaseq/results/fastqc_*/**.html
+rm -rf ~/ngs_project/dnaseq/results/fastqc_*/**.zip
+rm -rf ~/ngs_project/dnaseq/results/fastqc_*/*_fastqc
+rm -rf ~/ngs_project/dnaseq/data/aligned_data/depth.txt
+rm -rf ~/ngs_project/dnaseq/data/aligned_data/flagstat.txt
+rm -rf ~/ngs_project/dnaseq/data/aligned_data/idxstat.txt
+
+#Download the annovar file onto you computer/device and then use FileZilla to transfer the annovar files onto your working directory
+#Confirm you annovar file is located in the directory
+ls -lh ~/
+
+#Change directories so that we can access the downloaded annovar
+cd ~/
+
+#Unpack annovar
+echo "unpacking annovar..."
+tar -zxvf annovar.latest.tar.gz
+
+#Download the required annovar databases
+echo "Downloading required annovar databases..."
+cd ~/annovar
+./annotate_variation.pl -buildver hg19 -downdb -webfrom annovar refGene humandb/
+./annotate_variation.pl -buildver hg19 -downdb -webfrom annovar dbnsfp31a_interpro humandb/
+./annotate_variation.pl -buildver hg19 -downdb -webfrom annovar snp138 humandb/
+
+#Change directory into the results directory
+cd ~/ngs_project/dnaseq/results
+
+#Step 10 variant prioritisation
+echo "Step 10: Variant Prioritisation"
+
+#Do variant prioritisation
+#Prioritise variants based on 'exonic' and not seen in the dpsnp
+echo "Prioritising variants..."
+awk -F, 'NR==1 || ($6 ~ /exonic/ && $12 == "")' NGS0001_filtered.hg19_multianno.csv > NGS0001_prioritized.csv
+
+#The NGS0001_prioritised.csv can be transferred onto your personal device using Filezilla
+#You can then view and interpret your results on excel
